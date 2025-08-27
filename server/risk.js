@@ -1,0 +1,6 @@
+
+import { q } from './db.js'; import { v4 as uuid } from 'uuid'; import axios from 'axios';
+export async function flag(user_id, ftype, details){ await q('insert into risk_flags(id, user_id, ftype, details) values ($1,$2,$3,$4)', [uuid(), user_id, ftype, details||{}]); if (process.env.ALERT_WEBHOOK){ try{ await axios.post(process.env.ALERT_WEBHOOK, { text:`Risk flag: ${ftype} for ${user_id} — ${JSON.stringify(details)}` }) }catch{} } }
+export async function stakeRatioCheck(user_id, stake_cents, balance_cents, ratioMax){ if (balance_cents<=0) return; const ratio=stake_cents/balance_cents; if (ratio>ratioMax) await flag(user_id,'HIGH_STAKE_RATIO',{stake_cents,balance_cents,ratio}) }
+export async function betVelocityCheck(user_id, windowMin, maxCount){ const rows=await q("select count(*)::int as c from user_events where user_id=$1 and created_at >= now() - ($2::text||' minutes')::interval", [user_id, String(windowMin)]); const c=rows[0]?.c||0; if(c>maxCount) await flag(user_id,'BET_VELOCITY',{count:c,windowMin}) }
+export async function correlateDevice(device_id){ if(!device_id) return; const rows=await q('select user_id from user_devices where device_id=$1 group by user_id',[device_id]); if(rows.length>1){ for(const r of rows){ await flag(r.user_id,'MULTI_ACCOUNT_SIGNAL',{ device_id, users: rows.map(x=>x.user_id) }) } } }
