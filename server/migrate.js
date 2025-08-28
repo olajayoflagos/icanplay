@@ -7,7 +7,14 @@ import { Pool } from 'pg';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const isLocal =
+  /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL || '') ||
+  process.env.DATABASE_URL?.startsWith('postgresql://localhost');
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: isLocal ? false : { rejectUnauthorized: false },
+});
 
 async function runSQL(client, filePath){
   const sql = fs.readFileSync(filePath, 'utf8');

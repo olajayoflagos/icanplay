@@ -1,7 +1,7 @@
 -- Withdrawal PIN + payout allowlist + attempts
 
-alter table if not exists users
-  add column if not exists withdraw_pin_hash text;
+ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS withdraw_pin_hash text;
 
 create table if not exists payout_destinations(
   id uuid primary key,
