@@ -1,10 +1,30 @@
-import 'dotenv/config'; import express from 'express'; import cors from 'cors'; import helmet from 'helmet'; import http from 'http'; import crypto from 'crypto'; import axios from 'axios'; import pino from 'pino'; import { Server } from 'socket.io'; import rateLimit from 'express-rate-limit'; import { v4 as uuid } from 'uuid';
+// server/index.js
+import 'dotenv/config';
+import express from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import http from 'http';
+import crypto from 'crypto';
+import axios from 'axios';
+import pino from 'pino';
+import { Server } from 'socket.io';
+import rateLimit from 'express-rate-limit';
+import { v4 as uuid } from 'uuid';
 import { pool, q, withTx, postTx, getBalanceCents } from './db.js';
 import { flag, stakeRatioCheck, betVelocityCheck, correlateDevice } from './risk.js';
 import { Chess, initCheckers, applyCheckersMove, initWhot, whotPlay, whotDraw, whotTickTimeout, initLudo, ludoRoll, ludoMove, archeryScore, poolShotSuccess } from './engines.js';
 import { withIdempotency } from './idempotency.js';
 import { getRakePercent, getFeatures, setConfig } from './config.js';
 import { swissPair, knockoutPair } from './tournaments.js';
+
+// NEW: WebAuthn + wallet registrar
+import {
+  generateRegistrationOptions,
+  verifyRegistrationResponse,
+  generateAuthenticationOptions,
+  verifyAuthenticationResponse,
+} from '@simplewebauthn/server';
+import registerWallet from './_wallet.js';
 
 const log = pino({ level: process.env.NODE_ENV==='production' ? 'info' : 'debug' });
 const app = express();
@@ -25,9 +45,37 @@ app.use('/api/', limiter);
 app.use('/api/', withIdempotency);
 
 function adminOnly(req,res,next){ if((req.headers['x-admin-key']||'')!== (process.env.ADMIN_KEY||'')) return res.status(401).json({error:'unauthorized'}); next() }
-async function auth(req){ const token=(req.headers.authorization||'').replace('Bearer ',''); if(!token) return null; const u=(await q('select id, username from users where id=$1',[token]))[0]; if(!u) return null; const device_id=req.headers['x-device-id']?.toString()?.slice(0,64)||null; const ip=req.headers['x-forwarded-for']?.split(',')[0]?.trim()||req.socket.remoteAddress; if(device_id){ await q('insert into user_devices(id,user_id,device_id,last_ip) values ($1,$2,$3,$4) on conflict do nothing',[uuid(),u.id,device_id,ip]); await q('update user_devices set last_seen=now(), last_ip=$1 where user_id=$2 and device_id=$3',[ip,u.id,device_id]); await correlateDevice(device_id) } return u }
 
-async function ensureState(match){ const last=(await q('select state from match_states where match_id=$1 order by id desc limit 1',[match.id]))[0]?.state; if(last) return last; let S=null; if(match.game==='chess'){ const ch=new Chess(); S={ fen: ch.fen() } } if(match.game==='checkers'){ S=initCheckers() } if(match.game==='whot'){ S=initWhot() } if(match.game==='ludo'){ S=initLudo() } if(match.game==='archery'){ S={ seed: uuid().replace(/-/g,''), A:[], B:[], shots:0, bestOf:5, turn:'A' } } if(match.game==='pool8lite'){ S={ A:0,B:0,turn:'A' } } await q('insert into match_states(match_id,state) values ($1,$2)',[match.id,S]); return S }
+// Auth helper (augmented with device correlation; returns {id, username, withdraw_pin_hash?})
+async function auth(req){
+  const token=(req.headers.authorization||'').replace('Bearer ','');
+  if(!token) return null;
+  const u=(await q('select id, username, withdraw_pin_hash from users where id=$1',[token]))[0];
+  if(!u) return null;
+  const device_id=req.headers['x-device-id']?.toString()?.slice(0,64)||null;
+  const ip=req.headers['x-forwarded-for']?.split(',')[0]?.trim()||req.socket.remoteAddress;
+  if(device_id){
+    await q('insert into user_devices(id,user_id,device_id,last_ip) values ($1,$2,$3,$4) on conflict do nothing',[uuid(),u.id,device_id,ip]);
+    await q('update user_devices set last_seen=now(), last_ip=$1 where user_id=$2 and device_id=$3',[ip,u.id,device_id]);
+    await correlateDevice(device_id);
+  }
+  return u;
+}
+
+// ---- Match state helpers ----
+async function ensureState(match){
+  const last=(await q('select state from match_states where match_id=$1 order by id desc limit 1',[match.id]))[0]?.state;
+  if(last) return last;
+  let S=null;
+  if(match.game==='chess'){ const ch=new Chess(); S={ fen: ch.fen() } }
+  if(match.game==='checkers'){ S=initCheckers() }
+  if(match.game==='whot'){ S=initWhot() }
+  if(match.game==='ludo'){ S=initLudo() }
+  if(match.game==='archery'){ S={ seed: uuid().replace(/-/g,''), A:[], B:[], shots:0, bestOf:5, turn:'A' } }
+  if(match.game==='pool8lite'){ S={ A:0,B:0,turn:'A' } }
+  await q('insert into match_states(match_id,state) values ($1,$2)',[match.id,S]);
+  return S;
+}
 async function saveState(match_id, state){ await q('insert into match_states(match_id,state) values ($1,$2)',[match_id,state]) }
 const sideOf = (m, uid) => uid===m.creator_user_id ? 'A' : (uid===m.taker_user_id ? 'B' : null);
 const roleOf = (m, uid) => uid===m.creator_user_id ? 'PLAYER_A' : (uid===m.taker_user_id ? 'PLAYER_B' : 'SPECTATOR');
@@ -59,7 +107,17 @@ async function settleMatch(m, winner){
 }
 
 // ===== REST: auth/wallet kept same =====
-app.post('/api/auth/register', async (req,res)=>{ const { username } = req.body||{}; if(!username) return res.status(400).json({error:'Username required'}); const uname=String(username).trim().toLowerCase(); if(!/^[a-z0-9_]{3,16}$/.test(uname)) return res.status(400).json({error:'3-16 chars, letters/numbers/_ only'}); const exists=await q('select 1 from users where username=$1',[uname]); if(exists.length) return res.status(409).json({error:'Username taken'}); const id=uuid(); await q('insert into users(id,username) values ($1,$2)',[id,uname]); res.json({ token:id, user:{ id, username:uname } }) });
+app.post('/api/auth/register', async (req,res)=>{
+  const { username } = req.body||{};
+  if(!username) return res.status(400).json({error:'Username required'});
+  const uname=String(username).trim().toLowerCase();
+  if(!/^[a-z0-9_]{3,16}$/.test(uname)) return res.status(400).json({error:'3-16 chars, letters/numbers/_ only'});
+  const exists=await q('select 1 from users where username=$1',[uname]);
+  if(exists.length) return res.status(409).json({error:'Username taken'});
+  const id=uuid();
+  await q('insert into users(id,username) values ($1,$2)',[id,uname]);
+  res.json({ token:id, user:{ id, username:uname } })
+});
 app.get('/api/me', async (req,res)=>{ const u=await auth(req); if(!u) return res.status(401).json({error:'Unauthorized'}); res.json({ user:u }) });
 app.get('/api/wallet', async (req,res)=>{ const u=await auth(req); if(!u) return res.status(401).json({error:'Unauthorized'}); const bal=await getBalanceCents(u.id); const house=(await q("select coalesce(sum(case when account_type='HOUSE_CASH' then amount_cents else 0 end),0) as c from ledger_entries",[]))[0]?.c||0; res.json({ balance:bal/100, house:house/100 }) });
 
@@ -73,8 +131,117 @@ app.get('/api/matches', async (req,res)=>{
   res.json(rows.map(r=>({ ...r, stake: r.stake_cents/100 })));
 });
 
-// ===== Wallet deposit + Paystack webhooks kept same (omitted for brevity) =====
-import './_wallet.js'; // <— ignore; if you don’t split files, keep your existing wallet routes here
+// ===================
+// NEW: WebAuthn routes
+// ===================
+
+// In-memory stores for challenges + recent-auth window
+const regChallenges = new Map();    // userId -> challenge
+const authChallenges = new Map();   // userId -> challenge
+const recentAuth = new Map();       // userId -> expiresAt (ms)
+function webauthnOk(userId){ const t = recentAuth.get(userId) || 0; return t > Date.now(); }
+function markWebauthn(userId, minutes=5){ recentAuth.set(userId, Date.now() + minutes*60*1000); }
+
+// Register passkey: options
+app.get('/api/webauthn/register/options', async (req,res)=>{
+  const u = await auth(req); if(!u) return res.sendStatus(401);
+  const rpID = (new URL(process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`)).hostname;
+  const opts = await generateRegistrationOptions({
+    rpName: 'I Can Play',
+    rpID,
+    userID: u.id,
+    userName: u.username,
+    authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required' },
+    attestationType: 'none',
+  });
+  regChallenges.set(u.id, opts.challenge);
+  res.json(opts);
+});
+
+// Register passkey: verify
+app.post('/api/webauthn/register/verify', async (req,res)=>{
+  const u = await auth(req); if(!u) return res.sendStatus(401);
+  const expectedChallenge = regChallenges.get(u.id);
+  if(!expectedChallenge) return res.sendStatus(400);
+  const expectedOrigin = CLIENT_ORIGIN;
+  const expectedRPID = (new URL(process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`)).hostname;
+
+  const vr = await verifyRegistrationResponse({
+    response: req.body,
+    expectedChallenge,
+    expectedOrigin,
+    expectedRPID,
+  });
+  if(!vr.verified) return res.sendStatus(400);
+
+  const { credentialID, credentialPublicKey, counter, transports } = vr.registrationInfo;
+  await q(
+    `insert into user_passkeys(id,user_id,credential_id,public_key,counter,transports)
+     values (gen_random_uuid(),$1,$2,$3,$4,$5)
+     on conflict (user_id, credential_id) do update set public_key=$3,counter=$4,transports=$5`,
+    [u.id, Buffer.from(credentialID), Buffer.from(credentialPublicKey), counter, transports || []]
+  );
+  regChallenges.delete(u.id);
+  res.json({ ok:true });
+});
+
+// Assert passkey: options
+app.get('/api/webauthn/assert/options', async (req,res)=>{
+  const u = await auth(req); if(!u) return res.sendStatus(401);
+  const rpID = (new URL(process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`)).hostname;
+  const creds = await q('select credential_id from user_passkeys where user_id=$1',[u.id]);
+  const opts = await generateAuthenticationOptions({
+    rpID,
+    userVerification: 'required',
+    allowCredentials: creds.map(c=>({ id: c.credential_id, type:'public-key' }))
+  });
+  authChallenges.set(u.id, opts.challenge);
+  res.json(opts);
+});
+
+// Assert passkey: verify
+app.post('/api/webauthn/assert/verify', async (req,res)=>{
+  const u = await auth(req); if(!u) return res.sendStatus(401);
+  const expectedChallenge = authChallenges.get(u.id);
+  if(!expectedChallenge) return res.sendStatus(400);
+  const expectedOrigin = CLIENT_ORIGIN;
+  const expectedRPID = (new URL(process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`)).hostname;
+
+  const rawId = req.body?.rawId;
+  const cred = (await q('select * from user_passkeys where user_id=$1 and credential_id=$2',
+    [u.id, Buffer.from(rawId, 'base64url')]))[0];
+  if(!cred) return res.sendStatus(400);
+
+  const vr = await verifyAuthenticationResponse({
+    response: req.body,
+    expectedChallenge,
+    expectedOrigin,
+    expectedRPID,
+    authenticator: {
+      credentialID: cred.credential_id,
+      credentialPublicKey: cred.public_key,
+      counter: cred.counter
+    }
+  });
+
+  if(!vr.verified) return res.sendStatus(401);
+  await q('update user_passkeys set counter=$1 where user_id=$2 and credential_id=$3',
+    [vr.authenticationInfo.newCounter, u.id, cred.credential_id]);
+
+  authChallenges.delete(u.id);
+  markWebauthn(u.id, 5); // allow sensitive actions for 5 minutes
+  res.json({ ok:true });
+});
+
+// ===================
+// Wallet routes wiring
+// ===================
+
+// REMOVE the old side-effect import if present:
+// import './_wallet.js';
+
+// Register wallet routes (deposit, webhook, payout, withdraw w/ passkey+PIN)
+registerWallet(app, { auth, q, withTx, postTx, getBalanceCents, webauthnOk: (uid)=>webauthnOk(uid), PORT });
 
 // ===== Admin endpoints kept same (config/disputes/withdrawals/tournaments) =====
 // (use your previous code here — unchanged)
@@ -212,7 +379,6 @@ io.on('connection',(socket)=>{
     const m=(await q('select * from matches where id=$1',[matchId]))[0]; if(!m) return;
     const role = roleOf(m, user.id);
     if (role==='SPECTATOR' && !m.allow_spectator_chat) return;
-    // basic validations
     if (kind==='text'){ if(!text || text.length>500) return; }
     if (kind==='emoji'){ if(!emoji) return; }
     const id=uuid();
@@ -237,7 +403,6 @@ io.on('connection',(socket)=>{
     const { matchId } = payload || {}; if(!matchId) return;
     const m=(await q('select * from matches where id=$1',[matchId]))[0]; if(!m||!m.allow_voice) return;
     if (!isPlayer(m, user.id)) return; // only players can send
-    // send to room but receivers should ignore if they are not the other player
     io.to(m.room).emit(kind, { ...payload, from: user.id });
   }
   socket.on('rtc:offer',   p => relay('rtc:offer', p));

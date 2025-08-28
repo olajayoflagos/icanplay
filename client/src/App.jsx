@@ -1,3 +1,4 @@
+// client/src/App.jsx
 import React,{useEffect,useState} from 'react';
 import AuthBar from './components/AuthBar.jsx';
 import Wallet from './components/Wallet.jsx';
@@ -7,6 +8,8 @@ import Admin from './components/Admin.jsx';
 import OpenMatches from './components/OpenMatches.jsx';
 import ChatPanel from './components/ChatPanel.jsx';
 import VoicePanel from './components/VoicePanel.jsx';
+import PasskeySettings from './components/PasskeySettings.jsx';
+import WhatsAppFAB from './components/WhatsAppFAB.jsx';
 import { useSocket } from './useSocket';
 
 import Chess from './games/Chess.jsx';
@@ -49,7 +52,6 @@ export default function App(){
 
   // Lobby handlers
   function joinById(id){
-    // uses REST POST /api/matches/:id/join — we already have a Join form; keep quick action via that component or leave as is
     alert('Use "Join Match" with this ID: '+id);
   }
   function watchById(id){
@@ -71,54 +73,63 @@ export default function App(){
 
   const meIsPlayer = !!(user && match && (user.id===match.creator_user_id || user.id===match.taker_user_id));
 
-  return <div className='max-w-5xl mx-auto p-4 space-y-4'>
-    <AuthBar token={token} setToken={setToken} user={user} setUser={setUser} balance={balance} setBalance={setBalance} />
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-[#0b0f1a] to-black text-gray-100">
+      <div className='max-w-5xl mx-auto p-4 space-y-4'>
+        <AuthBar token={token} setToken={setToken} user={user} setUser={setUser} balance={balance} setBalance={setBalance} />
 
-    <div className='flex gap-2'>
-      <button onClick={()=>setView('home')} className={'px-3 py-1 rounded '+(view==='home'?'bg-gray-700':'bg-gray-800 hover:bg-gray-700')}>Home</button>
-      <button onClick={()=>setView('admin')} className={'px-3 py-1 rounded '+(view==='admin'?'bg-gray-700':'bg-gray-800 hover:bg-gray-700')}>Admin</button>
-      {match && <button onClick={()=>setView('match')} className={'px-3 py-1 rounded '+(view==='match'?'bg-gray-700':'bg-gray-800 hover:bg-gray-700')}>Match</button>}
-    </div>
+        <div className='flex gap-2'>
+          <button onClick={()=>setView('home')} className={'px-3 py-1 rounded '+(view==='home'?'bg-gray-700':'bg-gray-800 hover:bg-gray-700')}>Home</button>
+          <button onClick={()=>setView('admin')} className={'px-3 py-1 rounded '+(view==='admin'?'bg-gray-700':'bg-gray-800 hover:bg-gray-700')}>Admin</button>
+          {match && <button onClick={()=>setView('match')} className={'px-3 py-1 rounded '+(view==='match'?'bg-gray-700':'bg-gray-800 hover:bg-gray-700')}>Match</button>}
+        </div>
 
-    {view==='home' && <div className='grid md:grid-cols-2 gap-4'>
-      <div className='space-y-4'>
-        <Wallet token={token} onBalance={setBalance} />
-        <CreateMatch token={token} onCreated={onCreated} />
-        <JoinMatch token={token} onJoined={onJoined} />
-        <OpenMatches token={token} socket={sockRef.current} onJoin={joinById} onWatch={watchById} />
-      </div>
-      <div className='rounded-xl bg-gray-900/40 border border-gray-800 p-3'>
-        <h3 className='font-semibold mb-2'>How it works</h3>
-        <ol className='list-decimal ml-5 space-y-1 text-sm opacity-80'>
-          <li>Register a username (no KYC for now).</li>
-          <li>Deposit demo funds or connect Paystack on server for real money.</li>
-          <li>Create a match, share the Match ID; opponent joins.</li>
-          <li>Spectators can watch LIVE and chat (players + spectators see chat).</li>
-          <li>Players can enable voice to talk (spectators listen via chat only).</li>
-        </ol>
-      </div>
-    </div>}
-
-    {view==='match' && match && <div className='rounded-xl bg-gray-900/40 border border-gray-800 p-3 space-y-3'>
-      <div className='flex items-center justify-between'>
-        <div>
-          <div className='font-semibold'>Match</div>
-          <div className='text-sm opacity-80'>
-            ID: {match.id} • {match.game} • Stake ₦{match.stake} • Status {match.status}
+        {view==='home' && <div className='grid md:grid-cols-2 gap-4'>
+          <div className='space-y-4'>
+            <Wallet token={token} onBalance={setBalance} />
+            <PasskeySettings token={token} />
+            <CreateMatch token={token} onCreated={onCreated} />
+            <JoinMatch token={token} onJoined={onJoined} />
+            <OpenMatches token={token} socket={sockRef.current} onJoin={joinById} onWatch={watchById} />
           </div>
-        </div>
-        <button onClick={()=>{ setMatch(null); setGstate(null); setView('home'); }} className='px-3 py-1 rounded bg-red-600 hover:bg-red-700'>Leave</button>
+          <div className='rounded-2xl bg-gray-900/40 border border-gray-800 p-4 shadow-lg'>
+            <h3 className='font-semibold mb-2'>How it works</h3>
+            <ol className='list-decimal ml-5 space-y-1 text-sm opacity-80'>
+              <li>Register a unique username (no KYC).</li>
+              <li>Deposit (demo or Paystack live).</li>
+              <li>Create a match, share the Match ID; opponent joins.</li>
+              <li>Spectators can watch LIVE and chat (players + spectators see chat).</li>
+              <li>Players can enable voice (players only) to talk while playing.</li>
+              <li>Withdrawals & payout changes require Passkey + 6-digit PIN.</li>
+            </ol>
+          </div>
+        </div>}
+
+        {view==='match' && match && <div className='rounded-2xl bg-gray-900/40 border border-gray-800 p-4 space-y-3 shadow-lg'>
+          <div className='flex items-center justify-between'>
+            <div>
+              <div className='font-semibold'>Match</div>
+              <div className='text-sm opacity-80'>
+                ID: {match.id} • {match.game} • Stake ₦{match.stake} • Status {match.status}
+              </div>
+            </div>
+            <button onClick={()=>{ setMatch(null); setGstate(null); setView('home'); }} className='px-3 py-1 rounded bg-red-600 hover:bg-red-700'>Leave</button>
+          </div>
+
+          <div className='grid md:grid-cols-3 gap-3'>
+            <div className='md:col-span-2'><GameView /></div>
+            <div className='space-y-3'>
+              <ChatPanel socket={sockRef.current} match={match} />
+              <VoicePanel socket={sockRef.current} match={match} meIsPlayer={meIsPlayer} />
+            </div>
+          </div>
+        </div>}
+
+        {view==='admin' && <Admin token={token} />}
       </div>
 
-      <div className='grid md:grid-cols-3 gap-3'>
-        <div className='md:col-span-2'><GameView /></div>
-        <div className='space-y-3'>
-          <ChatPanel socket={sockRef.current} match={match} />
-          <VoicePanel socket={sockRef.current} match={match} meIsPlayer={meIsPlayer} />
-        </div>
-      </div>
-    </div>}
-
-    {view==='admin' && <Admin token={token} />}
-  </div>
+      {/* Floating WhatsApp button */}
+      <WhatsAppFAB />
+    </div>
+  );
 }
