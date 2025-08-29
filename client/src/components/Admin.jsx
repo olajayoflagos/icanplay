@@ -1,9 +1,11 @@
-
+// client/src/components/Admin.jsx
 import React,{useState,useEffect} from 'react';
 import { api } from '../api';
 
-export default function Admin({ token }){
-  const [adminKey,setAdminKey]=useState(localStorage.getItem('admin_key')||'');
+export default function Admin({ token, adminKey }){
+  // If somehow rendered without a key, show nothing
+  if (!adminKey) return <div className="text-sm opacity-70">Admin key required.</div>;
+
   const [cfg,setCfg]=useState(null);
   const [rake,setRake]=useState(10);
   const [features,setFeatures]=useState({});
@@ -19,19 +21,36 @@ export default function Admin({ token }){
   const [buyin,setBuyin]=useState(0);
   const [enrollUser,setEnrollUser]=useState('');
 
-  function withAdmin(){ return api(token, adminKey) }
-  function saveKey(){ localStorage.setItem('admin_key', adminKey); alert('Admin key saved'); }
+  // attach x-admin-key to every call
+  function withAdmin(){
+    const inst = api(token);
+    inst.defaults.headers['x-admin-key'] = adminKey;
+    return inst;
+  }
 
   async function loadConfig(){
-    try{ const r=await withAdmin().get('/api/admin/config'); setCfg(r.data); setRake(r.data.rake_percent); setFeatures(r.data.features||{}); }catch(e){ alert('Admin auth failed'); }
+    try{
+      const r = await withAdmin().get('/api/admin/config');
+      setCfg(r.data);
+      setRake(r.data.rake_percent);
+      setFeatures(r.data.features||{});
+    }catch(e){
+      alert('Admin auth failed');
+    }
   }
   async function updateConfig(){
-    try{ await withAdmin().post('/api/admin/config', { rake_percent: Number(rake), features }); await loadConfig(); }catch(e){ alert('Update failed') }
+    try{
+      await withAdmin().post('/api/admin/config', { rake_percent: Number(rake), features });
+      await loadConfig();
+    }catch(e){ alert('Update failed') }
   }
   async function loadDisputes(){ const r=await withAdmin().get('/api/admin/disputes'); setDisputes(r.data) }
   async function loadWithdrawals(){ const r=await withAdmin().get('/api/admin/withdrawals'); setWithdrawals(r.data) }
   async function loadRisk(){ const r=await withAdmin().get('/api/admin/risk-flags'); setRisk(r.data) }
-  async function reviewWithdrawal(id, decision){ await withAdmin().post(`/api/withdrawals/${id}/review`, { decision, reviewer: 'admin-ui' }); await loadWithdrawals(); }
+  async function reviewWithdrawal(id, decision){
+    await withAdmin().post(`/api/withdrawals/${id}/review`, { decision, reviewer: 'admin-ui' });
+    await loadWithdrawals();
+  }
 
   async function createTournament(){
     const r=await withAdmin().post('/api/admin/tournaments', { name:tname, ttype, buy_in_cents: Math.floor(buyin*100) });
@@ -41,18 +60,20 @@ export default function Admin({ token }){
   async function pairSwiss(){ const r=await withAdmin().post(`/api/admin/tournaments/${tid}/pair`, { mode:'SWISS', game:'chess' }); alert('Created matches: '+r.data.created.length) }
   async function pairKO(){ const r=await withAdmin().post(`/api/admin/tournaments/${tid}/pair`, { mode:'KO', game:'chess' }); alert('Created matches: '+r.data.created.length) }
 
-  useEffect(()=>{ if(adminKey) loadConfig(); },[]);
+  useEffect(()=>{ loadConfig(); /* load initial admin data if you want */ },[]);
 
   return <div className='space-y-4'>
-    <div className='rounded-xl bg-gray-900/40 border border-gray-800 p-3 space-y-2'>
-      <div className='flex gap-2 items-center'>
-        <input value={adminKey} onChange={e=>setAdminKey(e.target.value)} placeholder='x-admin-key' className='px-2 py-1 rounded text-black w-[340px]'/>
-        <button onClick={saveKey} className='px-3 py-1 rounded bg-slate-600 hover:bg-slate-700'>Save</button>
-        <button onClick={loadConfig} className='px-3 py-1 rounded bg-blue-600 hover:bg-blue-700'>Load Config</button>
+    {/* Config */}
+    <div className='rounded-2xl bg-gray-900/40 border border-gray-800 p-4 space-y-3 shadow-lg'>
+      <div className='flex items-center justify-between'>
+        <h3 className='font-semibold'>Site Config</h3>
+        <button onClick={loadConfig} className='px-3 py-1 rounded-xl bg-blue-600 hover:bg-blue-700'>Refresh</button>
       </div>
-      {cfg && <div className='space-y-2'>
-        <div className='flex gap-3 items-center'>
-          <label>Rake % <input type='number' value={rake} onChange={e=>setRake(e.target.value)} className='px-2 py-1 rounded text-black w-20 ml-2'/></label>
+      {cfg ? (
+        <div className='flex flex-wrap gap-3 items-center'>
+          <label className="flex items-center gap-2">Rake %
+            <input type='number' value={rake} onChange={e=>setRake(e.target.value)} className='px-2 py-1 rounded text-black w-20'/>
+          </label>
           <label className='flex items-center gap-2'>
             <input type='checkbox' checked={!!features.archery} onChange={e=>setFeatures({...features, archery:e.target.checked})}/> Archery
           </label>
@@ -65,53 +86,74 @@ export default function Admin({ token }){
           <label className='flex items-center gap-2'>
             <input type='checkbox' checked={!!features.swiss} onChange={e=>setFeatures({...features, swiss:e.target.checked})}/> Swiss
           </label>
-          <button onClick={updateConfig} className='px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-700'>Update</button>
+          <button onClick={updateConfig} className='px-3 py-1 rounded-xl bg-emerald-600 hover:bg-emerald-700'>Update</button>
         </div>
-      </div>}
+      ) : (
+        <div className='text-sm opacity-80'>Config not loaded yet.</div>
+      )}
     </div>
 
+    {/* Disputes */}
     <div className='grid md:grid-cols-3 gap-4'>
-      <div className='rounded-xl bg-gray-900/40 border border-gray-800 p-3'>
-        <h3 className='font-semibold mb-2'>Disputes</h3>
-        <button onClick={loadDisputes} className='mb-2 px-3 py-1 rounded bg-blue-600 hover:bg-blue-700'>Refresh</button>
+      <div className='rounded-2xl bg-gray-900/40 border border-gray-800 p-4 shadow-lg'>
+        <div className='flex items-center justify-between mb-2'>
+          <h3 className='font-semibold'>Disputes</h3>
+          <button onClick={loadDisputes} className='px-3 py-1 rounded-xl bg-blue-600 hover:bg-blue-700'>Refresh</button>
+        </div>
         <div className='space-y-2 max-h-64 overflow-auto'>
-          {disputes.map(d=>(<div key={d.id} className='p-2 rounded bg-gray-800'>
-            <div className='text-xs'>{d.id}</div>
-            <div className='text-sm'>{d.reason}</div>
-            <div className='text-xs opacity-70'>{d.status}</div>
-          </div>))}
+          {disputes.map(d=>(
+            <div key={d.id} className='p-2 rounded bg-gray-800'>
+              <div className='text-xs'>{d.id}</div>
+              <div className='text-sm'>{d.reason}</div>
+              <div className='text-xs opacity-70'>{d.status}</div>
+            </div>
+          ))}
+          {!disputes.length && <div className="text-sm opacity-70">No disputes.</div>}
         </div>
       </div>
 
-      <div className='rounded-xl bg-gray-900/40 border border-gray-800 p-3'>
-        <h3 className='font-semibold mb-2'>Withdrawals</h3>
-        <button onClick={loadWithdrawals} className='mb-2 px-3 py-1 rounded bg-blue-600 hover:bg-blue-700'>Refresh</button>
+      {/* Withdrawals */}
+      <div className='rounded-2xl bg-gray-900/40 border border-gray-800 p-4 shadow-lg'>
+        <div className='flex items-center justify-between mb-2'>
+          <h3 className='font-semibold'>Withdrawals</h3>
+          <button onClick={loadWithdrawals} className='px-3 py-1 rounded-xl bg-blue-600 hover:bg-blue-700'>Refresh</button>
+        </div>
         <div className='space-y-2 max-h-64 overflow-auto'>
-          {withdrawals.map(w=>(<div key={w.id} className='p-2 rounded bg-gray-800 space-y-1'>
-            <div className='text-xs'>{w.id}</div>
-            <div className='text-sm'>₦{(w.amount_cents/100).toFixed(2)} — {w.status}</div>
-            {w.status==='PENDING' && <div className='flex gap-2'>
-              <button onClick={()=>reviewWithdrawal(w.id,'APPROVE')} className='px-2 py-1 rounded bg-emerald-600'>Approve</button>
-              <button onClick={()=>reviewWithdrawal(w.id,'REJECT')} className='px-2 py-1 rounded bg-red-600'>Reject</button>
-            </div>}
-          </div>))}
+          {withdrawals.map(w=>(
+            <div key={w.id} className='p-2 rounded bg-gray-800 space-y-1'>
+              <div className='text-xs'>{w.id}</div>
+              <div className='text-sm'>₦{(w.amount_cents/100).toFixed(2)} — {w.status}</div>
+              {w.status==='PENDING' && <div className='flex gap-2'>
+                <button onClick={()=>reviewWithdrawal(w.id,'APPROVE')} className='px-2 py-1 rounded bg-emerald-600'>Approve</button>
+                <button onClick={()=>reviewWithdrawal(w.id,'REJECT')} className='px-2 py-1 rounded bg-red-600'>Reject</button>
+              </div>}
+            </div>
+          ))}
+          {!withdrawals.length && <div className="text-sm opacity-70">No withdrawals.</div>}
         </div>
       </div>
 
-      <div className='rounded-xl bg-gray-900/40 border border-gray-800 p-3'>
-        <h3 className='font-semibold mb-2'>Risk Flags</h3>
-        <button onClick={loadRisk} className='mb-2 px-3 py-1 rounded bg-blue-600 hover:bg-blue-700'>Refresh</button>
+      {/* Risk */}
+      <div className='rounded-2xl bg-gray-900/40 border border-gray-800 p-4 shadow-lg'>
+        <div className='flex items-center justify-between mb-2'>
+          <h3 className='font-semibold'>Risk Flags</h3>
+          <button onClick={loadRisk} className='px-3 py-1 rounded-xl bg-blue-600 hover:bg-blue-700'>Refresh</button>
+        </div>
         <div className='space-y-2 max-h-64 overflow-auto'>
-          {risk.map(r=>(<div key={r.id} className='p-2 rounded bg-gray-800 text-sm'>
-            <div className='text-xs'>{r.id}</div>
-            <div className='opacity-80'>{r.ftype}</div>
-            <pre className='text-[10px] opacity-70 whitespace-pre-wrap'>{JSON.stringify(r.details)}</pre>
-          </div>))}
+          {risk.map(r=>(
+            <div key={r.id} className='p-2 rounded bg-gray-800 text-sm'>
+              <div className='text-xs'>{r.id}</div>
+              <div className='opacity-80'>{r.ftype}</div>
+              <pre className='text-[10px] opacity-70 whitespace-pre-wrap'>{JSON.stringify(r.details)}</pre>
+            </div>
+          ))}
+          {!risk.length && <div className="text-sm opacity-70">No risk flags.</div>}
         </div>
       </div>
     </div>
 
-    <div className='rounded-xl bg-gray-900/40 border border-gray-800 p-3 space-y-2'>
+    {/* Tournaments */}
+    <div className='rounded-2xl bg-gray-900/40 border border-gray-800 p-4 space-y-3 shadow-lg'>
       <h3 className='font-semibold'>Tournaments</h3>
       <div className='flex flex-wrap gap-2 items-center'>
         <input value={tname} onChange={e=>setTname(e.target.value)} className='px-2 py-1 rounded text-black' placeholder='Name'/>
