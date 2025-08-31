@@ -3,7 +3,7 @@ import React, { useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useSocket } from './useSocket';
 
-import Navbar from './components/Navbar.jsx';
+import NavBar from './components/NavBar.jsx';
 import WhatsAppFAB from './components/WhatsAppFAB.jsx';
 
 import Landing from './pages/Landing.jsx';

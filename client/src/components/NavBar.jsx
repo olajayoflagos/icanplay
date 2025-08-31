@@ -3,7 +3,7 @@ import React, { useEffect, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import AuthBar from './AuthBar.jsx';
 
-export default function Navbar({ token, setToken, user, setUser, balance, setBalance }) {
+export default function NavBar({ token, setToken, user, setUser, balance, setBalance }) {
   const { pathname } = useLocation();
   const [open, setOpen] = useState(false);
 
