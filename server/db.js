@@ -1,6 +1,7 @@
 
 // server/db.js
 import pkg from 'pg';
+import { v4 as uuid } from 'uuid';
 const { Pool } = pkg;
 
 const connectionString = process.env.DATABASE_URL;

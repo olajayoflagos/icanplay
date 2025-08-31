@@ -49,7 +49,7 @@ export default function Dashboard({ token, onBalance, socket, onCreated, onJoine
         <div className="rounded-2xl bg-gray-900/40 border border-gray-800 p-4">
           <h3 className="font-semibold mb-2">How it Works</h3>
           <ol className="list-decimal ml-5 text-sm opacity-90 space-y-2 leading-relaxed">
-            <li><strong>Register:</strong> Pick a unique username. No KYC for now.</li>
+            <li><strong>Register:</strong> Pick a unique username. No KYC.</li>
             <li><strong>Secure your account:</strong> In <em>Settings → Security</em>, enable a Passkey (Face/Touch) and set your 6-digit Withdrawal PIN.</li>
             <li><strong>Fund your wallet:</strong> In the Wallet card: 
               <ul className="list-disc ml-5 mt-1">

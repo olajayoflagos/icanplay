@@ -16,14 +16,14 @@ export default function Landing(){
           </p>
           <div className="flex gap-3">
             <Link to="/dashboard" className="px-4 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 shadow">
-              Go to Dashboard
+              Dashboard
             </Link>
-            <Link to="/settings" className="px-4 py-3 rounded-xl bg-gray-800 hover:bg-gray-700">
-              Security & Settings
+            <Link to="/arena" className="px-4 py-3 rounded-xl bg-gray-800 hover:bg-gray-700">
+              Visit Arena
             </Link>
           </div>
           <p className="text-xs text-gray-400">
-            No KYC for now. Withdrawals & payout changes require Passkey + 6-digit PIN.
+            Withdrawals & payout changes require Passkey + 6-digit PIN.
           </p>
         </div>
         <div className="rounded-2xl overflow-hidden border border-gray-800">

@@ -1,10 +1,9 @@
-// client/src/connectSocket.js
 import { io } from 'socket.io-client';
-import { API } from './api';   // use the same export everywhere
+import { API_BASE } from './api';
 
 export function connectSocket(token) {
-  return io(API, {
-    transports: ['websocket'],   // force WebSocket for Render/Vercel
+  return io(API_BASE, {
+    transports: ['websocket'], // force WebSocket for Render/Vercel
     autoConnect: true,
     auth: { token }
   });
