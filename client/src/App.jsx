@@ -61,7 +61,7 @@ export default function App(){
   return (
     <BrowserRouter>
       <div className="min-h-screen bg-gradient-to-b from-[#0b0f1a] to-black text-gray-100">
-        <Navbar token={token} setToken={setToken} user={user} setUser={setUser} balance={balance} />
+        <NavBar token={token} setToken={setToken} user={user} setUser={setUser} balance={balance} />
 
         <div className="max-w-6xl mx-auto px-3 md:px-4 py-4">
           <Routes>
