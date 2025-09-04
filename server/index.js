@@ -27,7 +27,6 @@ const io = new Server(server, { cors: { origin: CLIENT_ORIGIN } });
 async function auth(req) {
   const token = (req.headers.authorization || '').replace('Bearer ', '');
   if (!token) return null;
-  // token is our user.id (uuid). If it's not a uuid, auth should fail.
   const u = (await q('select id, username from users where id=$1', [token]))[0];
   return u || null;
 }
@@ -50,7 +49,7 @@ app.post('/api/auth/register', async (req, res) => {
   } catch (e) { return res.status(500).json({ error: 'register_failed' }); }
 });
 
-// NEW: login by username to avoid “username as token” mistakes.
+// simple username → token login (no password yet)
 app.post('/api/auth/login', async (req, res) => {
   try {
     const uname = String(req.body?.username || '').trim().toLowerCase();
@@ -91,7 +90,7 @@ app.post('/api/wallet/deposit/initiate', async (req, res) => {
     if (cents <= 0) return res.status(400).json({ error: 'Invalid amount' });
     const email = req.body?.email;
 
-    // No email => credit DEMO wallet
+    // Demo top-up
     if (!email) {
       await withTx(async (c) => {
         await postTx(c, 'DEMO_TOPUP', null, [
@@ -118,7 +117,7 @@ app.post('/api/wallet/deposit/initiate', async (req, res) => {
       authorization_url: r.data?.data?.authorization_url,
       reference: r.data?.data?.reference
     });
-  } catch (e) {
+  } catch {
     return res.status(500).json({ error: 'deposit_init_failed' });
   }
 });
@@ -155,7 +154,7 @@ app.post('/api/wallet/deposit/webhook', async (req, res) => {
       await postTx(c, 'DEPOSIT', reference, [
         { account_type: 'PROCESSOR_CLEARING', user_id: null, amount_cents: -amount_cents },
         { account_type: 'USER_CASH', user_id: user_id, amount_cents: amount_cents }
-      ], reference); // idempotent via reference
+      ], reference);
     });
 
     res.sendStatus(200);
@@ -192,7 +191,7 @@ app.post('/api/payouts/recipient', async (req, res) => {
       [uuid(), u.id, code, `${bank_code}-${account_number}`]
     );
     res.json({ ok: true, recipient_code: code });
-  } catch (e) {
+  } catch {
     res.status(500).json({ error: 'recipient_save_failed' });
   }
 });
@@ -216,7 +215,7 @@ app.post('/api/matches', async (req, res) => {
       [id, room, game, !!demo, stake_cents, escrow_cents, rake_cents, payout_cents, u.id, !!allow_spectators]
     );
     res.json({ id, game, demo: !!demo, stake: stake_cents / 100, status: 'OPEN' });
-  } catch (e) {
+  } catch {
     res.status(500).json({ error: 'create_match_failed' });
   }
 });
@@ -232,7 +231,7 @@ app.post('/api/matches/:id/join', async (req, res) => {
 
     await q('update matches set taker_user_id=$1, status=$2, updated_at=now() where id=$3', [u.id, 'LIVE', id]);
     res.json({ id: m.id, game: m.game, demo: m.demo, stake: m.stake_cents / 100, status: 'LIVE' });
-  } catch (e) {
+  } catch {
     res.status(500).json({ error: 'join_failed' });
   }
 });
@@ -245,8 +244,22 @@ app.get('/api/matches', async (req, res) => {
       [status]
     );
     res.json(rows.map(r => ({ id: r.id, game: r.game, demo: r.demo, stake: r.stake_cents / 100, status: r.status })));
-  } catch (e) {
+  } catch {
     res.status(500).json({ error: 'list_failed' });
+  }
+});
+
+// fetch a single match (useful for /match/:id deep links)
+app.get('/api/matches/:id', async (req, res) => {
+  try {
+    const m = (await q('select * from matches where id=$1', [req.params.id]))[0];
+    if (!m) return res.status(404).json({ error: 'Not found' });
+    res.json({
+      id: m.id, room: m.room, game: m.game, demo: m.demo, stake: m.stake_cents / 100,
+      status: m.status, creator_user_id: m.creator_user_id, taker_user_id: m.taker_user_id
+    });
+  } catch {
+    res.status(500).json({ error: 'get_failed' });
   }
 });
 
@@ -289,7 +302,6 @@ io.on('connection', (socket) => {
 
   socket.on('match:spectateJoin', async ({ id }) => {
     const m = (await q('select * from matches where id=$1', [id]))[0];
-    // default to allowing spectators if column missing or null
     const allowed = m?.allow_spectators ?? true;
     if (!m || !allowed) return;
     socket.join(m.room);
@@ -304,6 +316,81 @@ io.on('connection', (socket) => {
       taker_user_id: m.taker_user_id
     });
   });
+
+  // optional UX handlers (your client already emits these)
+  socket.on('match:pause', async ({ matchId }, ack) => {
+    try {
+      const m = (await q('select * from matches where id=$1', [matchId]))[0];
+      if (!m) return ack?.({ error: 'not_found' });
+      // you can persist pause counters here if you track them server-side
+      io.to(m.room).emit('match:paused', { by: user.id });
+      ack?.({ ok: true });
+    } catch (e) {
+      ack?.({ error: 'pause_failed' });
+    }
+  });
+
+  socket.on('match:resume', async ({ matchId }, ack) => {
+    try {
+      const m = (await q('select * from matches where id=$1', [matchId]))[0];
+      if (!m) return ack?.({ error: 'not_found' });
+      io.to(m.room).emit('match:resumed', { by: user.id });
+      ack?.({ ok: true });
+    } catch (e) {
+      ack?.({ error: 'resume_failed' });
+    }
+  });
 });
 
+// ---------- auto-cancel stale OPEN matches (>= 14 days) ----------
+async function cancelStaleOpenMatches() {
+  // Only real-money matches matter for fees; demo has no funds.
+  const rows = await q(
+    `select * from matches
+     where status='OPEN' and created_at < now() - interval '14 days'
+     order by created_at asc
+     limit 200`
+  );
+
+  for (const m of rows) {
+    try {
+      await withTx(async (c) => {
+        // Mark cancelled
+        await c.query('update matches set status=$1, updated_at=now() where id=$2', ['CANCELLED', m.id]);
+
+        // If real match and both players exist and escrow > 0, split back minus rake
+        if (!m.demo && m.creator_user_id && m.taker_user_id && Number(m.escrow_cents) > 0) {
+          const rake = Number(m.rake_cents || 0);
+          const total = Number(m.escrow_cents || 0);
+          const toSplit = total - rake;
+          const each = Math.floor(toSplit / 2);
+
+          await postTx(
+            c,
+            'CANCEL',
+            `CANCEL_${m.id}`, // idempotency key
+            [
+              // rake → house
+              ...(rake > 0 ? [{ account_type: 'HOUSE_CASH', user_id: null, amount_cents: rake }] : []),
+              // split back to players
+              { account_type: 'USER_CASH', user_id: m.creator_user_id, amount_cents: each },
+              { account_type: 'USER_CASH', user_id: m.taker_user_id, amount_cents: each },
+              // release escrow bookkeeping (if you modeled escrow as a balance)
+              { account_type: 'ESCROW', user_id: null, amount_cents: -total }
+            ],
+            `stale_cancel_${m.id}`
+          );
+        }
+      });
+      log.info({ msg: 'auto_cancelled_match', id: m.id });
+    } catch (e) {
+      log.error({ msg: 'auto_cancel_failed', id: m.id, err: e?.message });
+    }
+  }
+}
+
+// run hourly
+setInterval(cancelStaleOpenMatches, 60 * 60 * 1000);
+
+// ---------- start ----------
 server.listen(PORT, () => log.info({ msg: 'I Can Play server listening', PORT }));
