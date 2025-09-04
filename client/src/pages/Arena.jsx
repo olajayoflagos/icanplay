@@ -39,14 +39,14 @@ export default function Arena({ token, socket, match, setMatch, gstate, meIsPlay
   const focusId = location.state?.focusMatchId || null;
 
   const [game, setGame] = useState(GAME_LIST[0].key);
-  const [realList, setRealList] = useState([]); // OPEN+LIVE (real)
-  const [demoList, setDemoList] = useState([]); // OPEN+LIVE (demo)
+  const [realList, setRealList] = useState([]); // OPEN + LIVE (real)
+  const [demoList, setDemoList] = useState([]); // OPEN + LIVE (demo)
   const [statusMsg, setStatusMsg] = useState('');
   const [lastJoinedId, setLastJoinedId] = useState(null);
 
   const api = useMemo(()=>axios.create({
     baseURL: API,
-    headers: token? { Authorization:'Bearer '+token } : {}
+    headers: token ? { Authorization:'Bearer '+token } : {}
   }), [token]);
 
   async function refreshMatches(){
@@ -58,27 +58,25 @@ export default function Arena({ token, socket, match, setMatch, gstate, meIsPlay
     setDemoList(all.filter(m=>m.demo));
   }
 
-  // initial + poll
   useEffect(()=>{
     refreshMatches();
     const t = setInterval(refreshMatches, 7000);
     return ()=>clearInterval(t);
   },[]);
 
-  // socket listeners: match state arrives here
+  // socket listeners: when room joins, server emits match:state
   useEffect(()=>{
     if(!socket) return;
 
     const onState = (s)=>{
-      // s: { id, room, game, demo, stake, status, creator_user_id, taker_user_id, ... }
       setMatch?.(s);
       setStatusMsg('');
       setLastJoinedId(s.id);
-      // If you have a dedicated Match page/route, navigate there:
-      // navigate(`/match/${s.id}`);
+      // Go to dedicated match page where the real game UI renders
+      navigate(`/match/${s.id}`);
     };
 
-    const onPresence = (_)=>{}; // you can show "X joined" toast if you want
+    const onPresence = (_)=>{};
     const onConnectError = (err)=> setStatusMsg('Connection error: '+(err?.message||''));
 
     socket.on('match:state', onState);
@@ -92,7 +90,7 @@ export default function Arena({ token, socket, match, setMatch, gstate, meIsPlay
     };
   }, [socket, setMatch, navigate]);
 
-  // auto-join the focused match when we land here from Dashboard
+  // auto-join if we were sent here from Create/Join
   useEffect(()=>{
     if (focusId && socket){
       socket.emit('match:joinRoom', { id: focusId });
@@ -166,7 +164,7 @@ export default function Arena({ token, socket, match, setMatch, gstate, meIsPlay
             {realList.map(m=>(
               <div key={m.id} className="p-3 rounded-xl bg-gray-800/60 flex items-center justify-between">
                 <div className="text-sm">
-                  <div className="font-semibold">{m.game}</div>
+                  <div className="font-semibold capitalize">{m.game}</div>
                   <div className="opacity-80">Stake ₦{m.stake} • {m.status}</div>
                   <div className="opacity-70 text-xs break-all">ID: {m.id}</div>
                 </div>
@@ -187,7 +185,7 @@ export default function Arena({ token, socket, match, setMatch, gstate, meIsPlay
             {demoList.map(m=>(
               <div key={m.id} className="p-3 rounded-xl bg-gray-800/60 flex items-center justify-between">
                 <div className="text-sm">
-                  <div className="font-semibold">{m.game}</div>
+                  <div className="font-semibold capitalize">{m.game}</div>
                   <div className="opacity-80">Stake ₦{m.stake} • {m.status}</div>
                   <div className="opacity-70 text-xs break-all">ID: {m.id}</div>
                 </div>
@@ -202,7 +200,6 @@ export default function Arena({ token, socket, match, setMatch, gstate, meIsPlay
         </div>
       </div>
 
-      {/* Minimal inline confirmation that we’re in a match */}
       {lastJoinedId && (
         <div className="rounded-2xl bg-gray-900/40 border border-gray-800 p-4">
           <div className="text-sm">
