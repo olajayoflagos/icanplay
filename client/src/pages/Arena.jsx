@@ -1,6 +1,5 @@
-// client/src/pages/Arena.jsx
 import React, { useEffect, useMemo, useState } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 
 const API = import.meta.env.VITE_API_BASE || 'http://localhost:4000';
@@ -36,25 +35,24 @@ function GameDummy({ game }){
 
 export default function Arena({ token, socket, match, setMatch, gstate, meIsPlayer }){
   const location = useLocation();
+  const navigate = useNavigate();
   const focusId = location.state?.focusMatchId || null;
 
   const [game, setGame] = useState(GAME_LIST[0].key);
   const [realList, setRealList] = useState([]); // OPEN+LIVE (real)
   const [demoList, setDemoList] = useState([]); // OPEN+LIVE (demo)
   const [statusMsg, setStatusMsg] = useState('');
+  const [lastJoinedId, setLastJoinedId] = useState(null);
 
   const api = useMemo(()=>axios.create({
     baseURL: API,
     headers: token? { Authorization:'Bearer '+token } : {}
   }), [token]);
 
-  // Merge OPEN and LIVE, dedupe, split by demo
   async function refreshMatches(){
     const get = (status)=> api.get(`/api/matches?status=${status}`).then(r=>r.data||[]).catch(()=>[]);
     const [openRows, liveRows] = await Promise.all([get('OPEN'), get('LIVE')]);
-    const merged = [...openRows, ...liveRows].reduce((acc, m)=>{
-      acc[m.id] = m; return acc;
-    }, {});
+    const merged = [...openRows, ...liveRows].reduce((acc, m)=>{ acc[m.id] = m; return acc; }, {});
     const all = Object.values(merged);
     setRealList(all.filter(m=>!m.demo));
     setDemoList(all.filter(m=>m.demo));
@@ -67,24 +65,53 @@ export default function Arena({ token, socket, match, setMatch, gstate, meIsPlay
     return ()=>clearInterval(t);
   },[]);
 
-  // auto-join if navigated here with a focus match
+  // socket listeners: match state arrives here
+  useEffect(()=>{
+    if(!socket) return;
+
+    const onState = (s)=>{
+      // s: { id, room, game, demo, stake, status, creator_user_id, taker_user_id, ... }
+      setMatch?.(s);
+      setStatusMsg('');
+      setLastJoinedId(s.id);
+      // If you have a dedicated Match page/route, navigate there:
+      // navigate(`/match/${s.id}`);
+    };
+
+    const onPresence = (_)=>{}; // you can show "X joined" toast if you want
+    const onConnectError = (err)=> setStatusMsg('Connection error: '+(err?.message||''));
+
+    socket.on('match:state', onState);
+    socket.on('presence:join', onPresence);
+    socket.on('connect_error', onConnectError);
+
+    return ()=>{
+      socket.off('match:state', onState);
+      socket.off('presence:join', onPresence);
+      socket.off('connect_error', onConnectError);
+    };
+  }, [socket, setMatch, navigate]);
+
+  // auto-join the focused match when we land here from Dashboard
   useEffect(()=>{
     if (focusId && socket){
       socket.emit('match:joinRoom', { id: focusId });
       setStatusMsg('Joined match. Loading…');
+      setLastJoinedId(focusId);
     }
   }, [focusId, socket]);
 
-  // helpers
   function joinRoom(id){
     if (!socket) return;
     socket.emit('match:joinRoom', { id });
     setStatusMsg('Joined match. Loading…');
+    setLastJoinedId(id);
   }
   function spectate(id){
     if (!socket) return;
     socket.emit('match:spectateJoin', { id });
     setStatusMsg('Spectating…');
+    setLastJoinedId(id);
   }
   function pause(id){
     if (!socket) return;
@@ -124,7 +151,7 @@ export default function Arena({ token, socket, match, setMatch, gstate, meIsPlay
           <ul className="list-disc ml-5 text-sm opacity-80 space-y-1">
             <li>Open & live matches are combined below.</li>
             <li>Lists are split by Real vs Demo.</li>
-            <li>Join to start playing immediately.</li>
+            <li>Join to start receiving live state.</li>
           </ul>
         </div>
       </div>
@@ -174,6 +201,16 @@ export default function Arena({ token, socket, match, setMatch, gstate, meIsPlay
           </div>
         </div>
       </div>
+
+      {/* Minimal inline confirmation that we’re in a match */}
+      {lastJoinedId && (
+        <div className="rounded-2xl bg-gray-900/40 border border-gray-800 p-4">
+          <div className="text-sm">
+            Connected to match: <span className="font-semibold break-all">{lastJoinedId}</span>
+          </div>
+          {!match && <div className="text-xs opacity-70 mt-1">Waiting for match state…</div>}
+        </div>
+      )}
     </div>
   );
 }
