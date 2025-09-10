@@ -3,307 +3,122 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import http from 'http';
-import axios from 'axios';
-import crypto from 'crypto';
-import pino from 'pino';
 import { Server } from 'socket.io';
 import { v4 as uuid } from 'uuid';
+import pino from 'pino';
+
 import { q, withTx, postTx, getBalanceCents } from './db.js';
+import * as settlement from './settlement.js';
+import * as chess from './games/chess.js';
+import * as checkers from './games/checkers.js';
+import * as whot from './games/whot.js';
+import * as ludo from './games/ludo.js';
+import * as archery from './games/archery.js';
+import * as pool from './games/pool.js';
 
 const log = pino({ level: process.env.NODE_ENV === 'production' ? 'info' : 'debug' });
 
 const app = express();
 app.use(helmet());
-app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
-
-const PORT = process.env.PORT || 4000;
-const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || '*';
-app.use(cors({ origin: CLIENT_ORIGIN, credentials: true }));
+app.use(cors({ origin: process.env.CLIENT_ORIGIN || '*', credentials: true }));
+app.use(express.json());
 
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: CLIENT_ORIGIN } });
+const io = new Server(server, { cors: { origin: process.env.CLIENT_ORIGIN || '*' } });
 
-// ---------- helpers ----------
+const GAME_ENGINES = { chess, checkers, whot, ludo, archery, pool };
+
+// ------------- AUTH -------------
 async function auth(req) {
   const token = (req.headers.authorization || '').replace('Bearer ', '');
   if (!token) return null;
-  // token is our user.id (uuid). If it's not a uuid, auth should fail.
   const u = (await q('select id, username from users where id=$1', [token]))[0];
   return u || null;
 }
-const roleOf = (m, uid) => (uid === m.creator_user_id ? 'PLAYER_A' : (uid === m.taker_user_id ? 'PLAYER_B' : 'SPECTATOR'));
-const sideOf = (m, uid) => (uid === m.creator_user_id ? 'A' : (uid === m.taker_user_id ? 'B' : null));
 
-// ---------- health ----------
-app.get('/api/health', (req, res) => res.json({ ok: true }));
+// ------------- API ROUTES (trimmed for brevity) -------------
+app.get('/api/health', (_, res) => res.json({ ok: true }));
+// keep your /auth, /wallet, /matches routes from before here
 
-// ---------- auth ----------
-app.post('/api/auth/register', async (req, res) => {
-  try {
-    const uname = String(req.body?.username || '').trim().toLowerCase();
-    if (!/^[a-z0-9_]{3,16}$/.test(uname)) return res.status(400).json({ error: '3-16 chars, letters/numbers/_ only' });
-    const exists = await q('select 1 from users where username=$1', [uname]);
-    if (exists.length) return res.status(409).json({ error: 'Username taken' });
-    const id = uuid();
-    await q('insert into users(id,username) values ($1,$2)', [id, uname]);
-    return res.json({ token: id, user: { id, username: uname } });
-  } catch (e) { return res.status(500).json({ error: 'register_failed' }); }
-});
-
-// NEW: login by username to avoid “username as token” mistakes.
-app.post('/api/auth/login', async (req, res) => {
-  try {
-    const uname = String(req.body?.username || '').trim().toLowerCase();
-    if (!uname) return res.status(400).json({ error: 'username_required' });
-    const u = (await q('select id, username from users where username=$1', [uname]))[0];
-    if (!u) return res.status(404).json({ error: 'not_found' });
-    return res.json({ token: u.id, user: u });
-  } catch (e) { return res.status(500).json({ error: 'login_failed' }); }
-});
-
-app.get('/api/me', async (req, res) => {
-  const u = await auth(req);
-  if (!u) return res.status(401).json({ error: 'Unauthorized' });
-  res.json({ user: u });
-});
-
-// ---------- wallet ----------
-app.get('/api/wallet', async (req, res) => {
-  const u = await auth(req);
-  if (!u) return res.status(401).json({ error: 'Unauthorized' });
-  const real = await getBalanceCents(u.id);
-  const demo = (await q(
-    "select coalesce(sum(amount_cents),0) as c from ledger_entries where account_type='USER_DEMO' and user_id=$1",
-    [u.id]
-  ))[0]?.c || 0;
-  const house = (await q(
-    "select coalesce(sum(case when account_type='HOUSE_CASH' then amount_cents else 0 end),0) as c from ledger_entries",
-    []
-  ))[0]?.c || 0;
-  res.json({ balance: real / 100, demo_balance: Number(demo) / 100, house: Number(house) / 100 });
-});
-
-app.post('/api/wallet/deposit/initiate', async (req, res) => {
-  try {
-    const u = await auth(req);
-    if (!u) return res.status(401).json({ error: 'Unauthorized' });
-    const cents = Math.floor(Number(req.body?.amount || 0) * 100);
-    if (cents <= 0) return res.status(400).json({ error: 'Invalid amount' });
-    const email = req.body?.email;
-
-    // No email => credit DEMO wallet
-    if (!email) {
-      await withTx(async (c) => {
-        await postTx(c, 'DEMO_TOPUP', null, [
-          { account_type: 'USER_DEMO', user_id: u.id, amount_cents: cents },
-          { account_type: 'OFFCHAIN_DEMO_BANK', user_id: null, amount_cents: -cents }
-        ]);
-      });
-      const demo = (await q(
-        "select coalesce(sum(amount_cents),0) as c from ledger_entries where account_type='USER_DEMO' and user_id=$1",
-        [u.id]
-      ))[0]?.c || 0;
-      return res.json({ demo: true, credited: cents / 100, demo_balance: Number(demo) / 100 });
-    }
-
-    // Real deposit via Paystack
-    const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET || '';
-    if (!PAYSTACK_SECRET) return res.status(400).json({ error: 'Paystack not configured' });
-    const r = await axios.post(
-      'https://api.paystack.co/transaction/initialize',
-      { email, amount: cents, currency: 'NGN', metadata: { user_id: u.id } },
-      { headers: { Authorization: 'Bearer ' + PAYSTACK_SECRET } }
-    );
-    return res.json({
-      authorization_url: r.data?.data?.authorization_url,
-      reference: r.data?.data?.reference
-    });
-  } catch (e) {
-    return res.status(500).json({ error: 'deposit_init_failed' });
-  }
-});
-
-// Paystack webhook (credits REAL funds)
-app.post('/api/wallet/deposit/webhook', async (req, res) => {
-  try {
-    const secret = process.env.PAYSTACK_SECRET || '';
-    if (!secret) return res.sendStatus(400);
-
-    // Optional IP allowlist
-    const allowed = (process.env.PAYSTACK_IP_WHITELIST || '')
-      .split(',').map(s => s.trim()).filter(Boolean);
-    const ip = (req.headers['x-forwarded-for']?.split(',')[0]?.trim())
-      || req.socket.remoteAddress;
-    if (allowed.length && !allowed.includes(ip)) return res.sendStatus(403);
-
-    // HMAC verify
-    const signature = req.headers['x-paystack-signature'];
-    const hash = crypto.createHmac('sha512', secret).update(req.rawBody).digest('hex');
-    if (signature !== hash) return res.sendStatus(401);
-
-    const event = JSON.parse(req.rawBody.toString('utf8'));
-    if (event?.event !== 'charge.success') return res.sendStatus(200);
-
-    const data = event.data || {};
-    const user_id = data?.metadata?.user_id;
-    const amount_cents = Number(data?.amount || 0); // Paystack sends kobo
-    const reference = String(data?.reference || '');
-
-    if (!user_id || !amount_cents || !reference) return res.sendStatus(400);
-
-    await withTx(async (c) => {
-      await postTx(c, 'DEPOSIT', reference, [
-        { account_type: 'PROCESSOR_CLEARING', user_id: null, amount_cents: -amount_cents },
-        { account_type: 'USER_CASH', user_id: user_id, amount_cents: amount_cents }
-      ], reference); // idempotent via reference
-    });
-
-    res.sendStatus(200);
-  } catch (e) {
-    log.error(e);
-    res.sendStatus(500);
-  }
-});
-
-// Save/Update payout recipient (Paystack)
-app.post('/api/payouts/recipient', async (req, res) => {
-  try {
-    const u = await auth(req);
-    if (!u) return res.status(401).json({ error: 'Unauthorized' });
-    const { bank_code, account_number, account_name } = req.body || {};
-    if (!bank_code || !account_number) return res.status(400).json({ error: 'bank_code and account_number required' });
-    const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET || '';
-    if (!PAYSTACK_SECRET) return res.status(400).json({ error: 'Paystack not configured' });
-
-    const r = await axios.post('https://api.paystack.co/transferrecipient', {
-      type: 'nuban',
-      name: account_name || u.username,
-      account_number,
-      bank_code,
-      currency: 'NGN'
-    }, { headers: { Authorization: 'Bearer ' + PAYSTACK_SECRET } });
-
-    const code = r.data?.data?.recipient_code;
-    await q(
-      `insert into payout_destinations(id,user_id,provider,recipient_code,display,status,usable_after)
-       values ($1,$2,'paystack',$3,$4,'PENDING', now() + interval '12 hours')
-       on conflict (user_id, recipient_code)
-       do update set display=$4, status='PENDING', usable_after=now() + interval '12 hours'`,
-      [uuid(), u.id, code, `${bank_code}-${account_number}`]
-    );
-    res.json({ ok: true, recipient_code: code });
-  } catch (e) {
-    res.status(500).json({ error: 'recipient_save_failed' });
-  }
-});
-
-// ---------- matches ----------
-app.post('/api/matches', async (req, res) => {
-  try {
-    const u = await auth(req);
-    if (!u) return res.status(401).json({ error: 'Unauthorized' });
-    const { game = 'chess', stake = 0, demo = true, allow_spectators = true } = req.body || {};
-    const id = uuid();
-    const room = 'room_' + id;
-    const stake_cents = Math.floor(Number(stake || 0) * 100);
-    const rake_cents = demo ? 0 : Math.floor(stake_cents * 0.10);
-    const escrow_cents = demo ? 0 : stake_cents * 2;
-    const payout_cents = demo ? 0 : (stake_cents * 2 - rake_cents);
-
-    await q(
-      `insert into matches(id,room,game,demo,stake_cents,escrow_cents,rake_cents,payout_cents,status,creator_user_id,allow_spectators)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,'OPEN',$9,$10)`,
-      [id, room, game, !!demo, stake_cents, escrow_cents, rake_cents, payout_cents, u.id, !!allow_spectators]
-    );
-    res.json({ id, game, demo: !!demo, stake: stake_cents / 100, status: 'OPEN' });
-  } catch (e) {
-    res.status(500).json({ error: 'create_match_failed' });
-  }
-});
-
-app.post('/api/matches/:id/join', async (req, res) => {
-  try {
-    const u = await auth(req);
-    if (!u) return res.status(401).json({ error: 'Unauthorized' });
-    const id = req.params.id;
-    const m = (await q('select * from matches where id=$1', [id]))[0];
-    if (!m) return res.status(404).json({ error: 'Not found' });
-    if (m.status !== 'OPEN') return res.status(400).json({ error: 'Not open' });
-
-    await q('update matches set taker_user_id=$1, status=$2, updated_at=now() where id=$3', [u.id, 'LIVE', id]);
-    res.json({ id: m.id, game: m.game, demo: m.demo, stake: m.stake_cents / 100, status: 'LIVE' });
-  } catch (e) {
-    res.status(500).json({ error: 'join_failed' });
-  }
-});
-
-app.get('/api/matches', async (req, res) => {
-  try {
-    const status = (req.query.status || 'OPEN').toUpperCase();
-    const rows = await q(
-      'select id,game,demo,stake_cents,status from matches where status=$1 order by created_at desc limit 100',
-      [status]
-    );
-    res.json(rows.map(r => ({ id: r.id, game: r.game, demo: r.demo, stake: r.stake_cents / 100, status: r.status })));
-  } catch (e) {
-    res.status(500).json({ error: 'list_failed' });
-  }
-});
-
-// ---------- sockets ----------
+// ------------- SOCKET HANDLERS -------------
 io.use(async (socket, next) => {
   try {
-    const token =
-      socket.handshake.auth?.token ||
-      socket.handshake.headers?.authorization?.replace('Bearer ', '') ||
-      '';
+    const token = socket.handshake.auth?.token ||
+      socket.handshake.headers?.authorization?.replace('Bearer ', '') || '';
     if (!token) return next(new Error('auth'));
     const u = (await q('select id, username from users where id=$1', [token]))[0];
     if (!u) return next(new Error('auth'));
     socket.user = u;
     next();
-  } catch {
-    next(new Error('auth'));
-  }
+  } catch { next(new Error('auth')); }
 });
 
 io.on('connection', (socket) => {
   const user = socket.user;
 
+  // Join as player
   socket.on('match:joinRoom', async ({ id }) => {
     const m = (await q('select * from matches where id=$1', [id]))[0];
     if (!m) return;
     socket.join(m.room);
-    socket.emit('match:state', {
-      id: m.id,
-      room: m.room,
-      game: m.game,
-      demo: m.demo,
-      stake: m.stake_cents / 100,
-      status: m.status,
-      creator_user_id: m.creator_user_id,
-      taker_user_id: m.taker_user_id
-    });
+    socket.emit('match:state', m);
     socket.to(m.room).emit('presence:join', { user: user.id });
   });
 
+  // Spectator
   socket.on('match:spectateJoin', async ({ id }) => {
     const m = (await q('select * from matches where id=$1', [id]))[0];
-    // default to allowing spectators if column missing or null
-    const allowed = m?.allow_spectators ?? true;
-    if (!m || !allowed) return;
+    if (!m || m.allow_spectators === false) return;
     socket.join(m.room);
-    socket.emit('match:state', {
-      id: m.id,
-      room: m.room,
-      game: m.game,
-      demo: m.demo,
-      stake: m.stake_cents / 100,
-      status: m.status,
-      creator_user_id: m.creator_user_id,
-      taker_user_id: m.taker_user_id
-    });
+    socket.emit('match:state', m);
   });
+
+  // Game action
+  socket.on('game:action', async ({ matchId, action }, ack) => {
+    try {
+      const m = (await q('select * from matches where id=$1', [matchId]))[0];
+      if (!m || m.status !== 'LIVE') return ack?.({ error: 'not_live' });
+
+      const engine = GAME_ENGINES[m.game];
+      if (!engine) return ack?.({ error: 'unknown_game' });
+
+      // Load current state (persisted or fallback to default)
+      const current = (await q('select state from match_states where match_id=$1', [m.id]))[0]?.state || engine.initialState();
+
+      const { nextState, winner, draw, error } = engine.applyAction(current, action, user.id);
+      if (error) return ack?.({ error });
+
+      // Save new state
+      await q(
+        `insert into match_states(match_id,state,updated_at)
+         values ($1,$2,now())
+         on conflict (match_id) do update set state=$2,updated_at=now()`,
+        [m.id, nextState]
+      );
+
+      // Broadcast state
+      io.to(m.room).emit(`${m.game}:update`, nextState);
+
+      // Handle settlement if game over
+      if (winner || draw) {
+        await settlement.settleMatch(m, winner, draw);
+        io.to(m.room).emit('match:settled', { winner, draw });
+      }
+
+      ack?.({ ok: true });
+    } catch (e) {
+      log.error(e);
+      ack?.({ error: 'action_failed' });
+    }
+  });
+
+  // Pause/Resume/Forfeit
+  socket.on('match:pause', (d, ack) => settlement.handlePause(io, socket, d, ack));
+  socket.on('match:resume', (d, ack) => settlement.handleResume(io, socket, d, ack));
+  socket.on('match:forfeit', (d, ack) => settlement.handleForfeit(io, socket, d, ack));
 });
 
-server.listen(PORT, () => log.info({ msg: 'I Can Play server listening', PORT }));
+// Auto-expire stale matches
+setInterval(() => settlement.expireMatches(io), 60 * 60 * 1000);
+
+server.listen(process.env.PORT || 4000, () => log.info('Server started'));
