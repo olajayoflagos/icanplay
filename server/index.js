@@ -1,3 +1,4 @@
+// server/index.js
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -9,7 +10,7 @@ import pino from 'pino';
 import { Server } from 'socket.io';
 import { v4 as uuid } from 'uuid';
 import { q, withTx, postTx, getBalanceCents } from './db.js';
-import { settleMatch, autoSettleIfOverdue } from './settlement.js';';
+import { settleMatch, autoSettleIfOverdue } from './settlement.js';
 
 const log = pino({ level: process.env.NODE_ENV === 'production' ? 'info' : 'debug' });
 
@@ -31,8 +32,8 @@ async function auth(req) {
   const u = (await q('select id, username from users where id=$1', [token]))[0];
   return u || null;
 }
-const roleOf = (m, uid) => (uid === m.creator_user_id ? 'PLAYER_A' : (uid === m.taker_user_id ? 'PLAYER_B' : 'SPECTATOR'));
-const sideOf = (m, uid) => (uid === m.creator_user_id ? 'A' : (uid === m.taker_user_id ? 'B' : null));
+const roleOf = (m, uid) =>
+  uid === m.creator_user_id ? 'PLAYER_A' : (uid === m.taker_user_id ? 'PLAYER_B' : 'SPECTATOR');
 
 // ---------- health ----------
 app.get('/api/health', (req, res) => res.json({ ok: true }));
@@ -41,16 +42,18 @@ app.get('/api/health', (req, res) => res.json({ ok: true }));
 app.post('/api/auth/register', async (req, res) => {
   try {
     const uname = String(req.body?.username || '').trim().toLowerCase();
-    if (!/^[a-z0-9_]{3,16}$/.test(uname)) return res.status(400).json({ error: '3-16 chars, letters/numbers/_ only' });
+    if (!/^[a-z0-9_]{3,16}$/.test(uname))
+      return res.status(400).json({ error: '3-16 chars, letters/numbers/_ only' });
     const exists = await q('select 1 from users where username=$1', [uname]);
     if (exists.length) return res.status(409).json({ error: 'Username taken' });
     const id = uuid();
     await q('insert into users(id,username) values ($1,$2)', [id, uname]);
     return res.json({ token: id, user: { id, username: uname } });
-  } catch (e) { return res.status(500).json({ error: 'register_failed' }); }
+  } catch (e) {
+    return res.status(500).json({ error: 'register_failed' });
+  }
 });
 
-// simple username → token login (no password yet)
 app.post('/api/auth/login', async (req, res) => {
   try {
     const uname = String(req.body?.username || '').trim().toLowerCase();
@@ -58,7 +61,9 @@ app.post('/api/auth/login', async (req, res) => {
     const u = (await q('select id, username from users where username=$1', [uname]))[0];
     if (!u) return res.status(404).json({ error: 'not_found' });
     return res.json({ token: u.id, user: u });
-  } catch (e) { return res.status(500).json({ error: 'login_failed' }); }
+  } catch (e) {
+    return res.status(500).json({ error: 'login_failed' });
+  }
 });
 
 app.get('/api/me', async (req, res) => {
@@ -71,27 +76,35 @@ app.get('/api/me', async (req, res) => {
 app.get('/api/wallet', async (req, res) => {
   const u = await auth(req);
   if (!u) return res.status(401).json({ error: 'Unauthorized' });
-  const real = await getBalanceCents(u.id);
-  const demo = (await q(
+
+  const realCents = await getBalanceCents(u.id) || 0;
+  const demoCents = (await q(
     "select coalesce(sum(amount_cents),0) as c from ledger_entries where account_type='USER_DEMO' and user_id=$1",
     [u.id]
   ))[0]?.c || 0;
-  const house = (await q(
+  const houseCents = (await q(
     "select coalesce(sum(case when account_type='HOUSE_CASH' then amount_cents else 0 end),0) as c from ledger_entries",
     []
   ))[0]?.c || 0;
-  res.json({ balance: real / 100, demo_balance: Number(demo) / 100, house: Number(house) / 100 });
+
+  res.json({
+    balance: Number(realCents) / 100,
+    demo_balance: Number(demoCents) / 100,
+    house: Number(houseCents) / 100,
+    user: u
+  });
 });
 
 app.post('/api/wallet/deposit/initiate', async (req, res) => {
   try {
     const u = await auth(req);
     if (!u) return res.status(401).json({ error: 'Unauthorized' });
+
     const cents = Math.floor(Number(req.body?.amount || 0) * 100);
     if (cents <= 0) return res.status(400).json({ error: 'Invalid amount' });
     const email = req.body?.email;
 
-    // Demo top-up
+    // DEMO TOP-UP
     if (!email) {
       await withTx(async (c) => {
         await postTx(c, 'DEMO_TOPUP', null, [
@@ -99,44 +112,42 @@ app.post('/api/wallet/deposit/initiate', async (req, res) => {
           { account_type: 'OFFCHAIN_DEMO_BANK', user_id: null, amount_cents: -cents }
         ]);
       });
-      const demo = (await q(
+      const demoCents = (await q(
         "select coalesce(sum(amount_cents),0) as c from ledger_entries where account_type='USER_DEMO' and user_id=$1",
         [u.id]
       ))[0]?.c || 0;
-      return res.json({ demo: true, credited: cents / 100, demo_balance: Number(demo) / 100 });
+      return res.json({
+        demo: true,
+        credited: cents / 100,
+        demo_balance: Number(demoCents) / 100
+      });
     }
 
-    // Real deposit via Paystack
+    // REAL DEPOSIT VIA PAYSTACK
     const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET || '';
     if (!PAYSTACK_SECRET) return res.status(400).json({ error: 'Paystack not configured' });
+
     const r = await axios.post(
       'https://api.paystack.co/transaction/initialize',
       { email, amount: cents, currency: 'NGN', metadata: { user_id: u.id } },
       { headers: { Authorization: 'Bearer ' + PAYSTACK_SECRET } }
     );
+
     return res.json({
       authorization_url: r.data?.data?.authorization_url,
       reference: r.data?.data?.reference
     });
-  } catch {
+  } catch (err) {
+    log.error({ msg: 'deposit_initiate_failed', err: err?.message });
     return res.status(500).json({ error: 'deposit_init_failed' });
   }
 });
 
-// Paystack webhook (credits REAL funds)
 app.post('/api/wallet/deposit/webhook', async (req, res) => {
   try {
     const secret = process.env.PAYSTACK_SECRET || '';
     if (!secret) return res.sendStatus(400);
 
-    // Optional IP allowlist
-    const allowed = (process.env.PAYSTACK_IP_WHITELIST || '')
-      .split(',').map(s => s.trim()).filter(Boolean);
-    const ip = (req.headers['x-forwarded-for']?.split(',')[0]?.trim())
-      || req.socket.remoteAddress;
-    if (allowed.length && !allowed.includes(ip)) return res.sendStatus(403);
-
-    // HMAC verify
     const signature = req.headers['x-paystack-signature'];
     const hash = crypto.createHmac('sha512', secret).update(req.rawBody).digest('hex');
     if (signature !== hash) return res.sendStatus(401);
@@ -146,54 +157,28 @@ app.post('/api/wallet/deposit/webhook', async (req, res) => {
 
     const data = event.data || {};
     const user_id = data?.metadata?.user_id;
-    const amount_cents = Number(data?.amount || 0); // Paystack sends kobo
+    const amount_cents = Number(data?.amount || 0);
     const reference = String(data?.reference || '');
 
     if (!user_id || !amount_cents || !reference) return res.sendStatus(400);
 
     await withTx(async (c) => {
-      await postTx(c, 'DEPOSIT', reference, [
-        { account_type: 'PROCESSOR_CLEARING', user_id: null, amount_cents: -amount_cents },
-        { account_type: 'USER_CASH', user_id: user_id, amount_cents: amount_cents }
-      ], reference);
+      await postTx(
+        c,
+        'DEPOSIT',
+        reference,
+        [
+          { account_type: 'PROCESSOR_CLEARING', user_id: null, amount_cents: -amount_cents },
+          { account_type: 'USER_CASH', user_id, amount_cents }
+        ],
+        reference
+      );
     });
 
     res.sendStatus(200);
   } catch (e) {
-    log.error(e);
+    log.error({ msg: 'webhook_failed', err: e?.message });
     res.sendStatus(500);
-  }
-});
-
-// Save/Update payout recipient (Paystack)
-app.post('/api/payouts/recipient', async (req, res) => {
-  try {
-    const u = await auth(req);
-    if (!u) return res.status(401).json({ error: 'Unauthorized' });
-    const { bank_code, account_number, account_name } = req.body || {};
-    if (!bank_code || !account_number) return res.status(400).json({ error: 'bank_code and account_number required' });
-    const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET || '';
-    if (!PAYSTACK_SECRET) return res.status(400).json({ error: 'Paystack not configured' });
-
-    const r = await axios.post('https://api.paystack.co/transferrecipient', {
-      type: 'nuban',
-      name: account_name || u.username,
-      account_number,
-      bank_code,
-      currency: 'NGN'
-    }, { headers: { Authorization: 'Bearer ' + PAYSTACK_SECRET } });
-
-    const code = r.data?.data?.recipient_code;
-    await q(
-      `insert into payout_destinations(id,user_id,provider,recipient_code,display,status,usable_after)
-       values ($1,$2,'paystack',$3,$4,'PENDING', now() + interval '12 hours')
-       on conflict (user_id, recipient_code)
-       do update set display=$4, status='PENDING', usable_after=now() + interval '12 hours'`,
-      [uuid(), u.id, code, `${bank_code}-${account_number}`]
-    );
-    res.json({ ok: true, recipient_code: code });
-  } catch {
-    res.status(500).json({ error: 'recipient_save_failed' });
   }
 });
 
@@ -250,7 +235,6 @@ app.get('/api/matches', async (req, res) => {
   }
 });
 
-// fetch a single match (useful for /match/:id deep links)
 app.get('/api/matches/:id', async (req, res) => {
   try {
     const m = (await q('select * from matches where id=$1', [req.params.id]))[0];
@@ -288,26 +272,67 @@ io.on('connection', (socket) => {
     const m = (await q('select * from matches where id=$1', [id]))[0];
     if (!m) return;
     socket.join(m.room);
-    socket.emit('match:state', {
-      id: m.id,
-      room: m.room,
-      game: m.game,
-      demo: m.demo,
-      stake: m.stake_cents / 100,
-      status: m.status,
-      creator_user_id: m.creator_user_id,
-      taker_user_id: m.taker_user_id
-    });
+    socket.emit('match:state', m);
     socket.to(m.room).emit('presence:join', { user: user.id });
   });
 
-  // spectators, pause/resume handlers same as before...
+  socket.on('match:spectateJoin', async ({ id }) => {
+    const m = (await q('select * from matches where id=$1', [id]))[0];
+    const allowed = m?.allow_spectators ?? true;
+    if (!m || !allowed) return;
+    socket.join(m.room);
+    socket.emit('match:state', m);
+  });
+
+  socket.on('match:pause', async ({ matchId }, ack) => {
+    try {
+      const m = (await q('select * from matches where id=$1', [matchId]))[0];
+      if (!m) return ack?.({ error: 'not_found' });
+      io.to(m.room).emit('match:paused', { by: user.id });
+      ack?.({ ok: true });
+    } catch (e) {
+      ack?.({ error: 'pause_failed' });
+    }
+  });
+
+  socket.on('match:resume', async ({ matchId }, ack) => {
+    try {
+      const m = (await q('select * from matches where id=$1', [matchId]))[0];
+      if (!m) return ack?.({ error: 'not_found' });
+      io.to(m.room).emit('match:resumed', { by: user.id });
+      ack?.({ ok: true });
+    } catch (e) {
+      ack?.({ error: 'resume_failed' });
+    }
+  });
 });
 
-// ---------- background tasks ----------
+// ---------- auto-cancel stale OPEN matches ----------
+async function cancelStaleOpenMatches() {
+  const rows = await q(
+    `select * from matches
+     where status='OPEN' and created_at < now() - interval '14 days'
+     order by created_at asc
+     limit 200`
+  );
+
+  for (const m of rows) {
+    try {
+      await withTx(async (c) => {
+        await c.query('update matches set status=$1, updated_at=now() where id=$2', ['CANCELLED', m.id]);
+      });
+      log.info({ msg: 'auto_cancelled_match', id: m.id });
+    } catch (e) {
+      log.error({ msg: 'auto_cancel_failed', id: m.id, err: e?.message });
+    }
+  }
+}
+setInterval(cancelStaleOpenMatches, 60 * 60 * 1000);
+
+// ---------- auto-settle overdue matches ----------
 setInterval(() => {
-  autoSettleIfOverdue(io, null, { logger: log }); // ✅ auto-settle 48hr overdue matches
-}, 60 * 60 * 1000); // every hour
+  autoSettleIfOverdue(io, null, { logger: log });
+}, 60 * 60 * 1000);
 
 // ---------- start ----------
 server.listen(PORT, () => log.info({ msg: 'I Can Play server listening', PORT }));
