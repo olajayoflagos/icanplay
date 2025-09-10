@@ -1,8 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import axios from 'axios';
-import ChatPanel from '../components/ChatPanel.jsx';
-import VoicePanel from '../components/VoicePanel.jsx';
 
 const API = import.meta.env.VITE_API_BASE || 'http://localhost:4000';
 
@@ -37,53 +35,89 @@ function GameDummy({ game }){
 
 export default function Arena({ token, socket, match, setMatch, gstate, meIsPlayer }){
   const location = useLocation();
-  const startedFlag = location.state?.started;
+  const navigate = useNavigate();
+  const focusId = location.state?.focusMatchId || null;
 
   const [game, setGame] = useState(GAME_LIST[0].key);
-  const [openReal, setOpenReal] = useState([]);
-  const [openDemo, setOpenDemo] = useState([]);
+  const [realList, setRealList] = useState([]); // OPEN + LIVE (real)
+  const [demoList, setDemoList] = useState([]); // OPEN + LIVE (demo)
   const [statusMsg, setStatusMsg] = useState('');
+  const [lastJoinedId, setLastJoinedId] = useState(null);
 
   const api = useMemo(()=>axios.create({
     baseURL: API,
-    headers: token? { Authorization:'Bearer '+token } : {}
+    headers: token ? { Authorization:'Bearer '+token } : {}
   }), [token]);
 
-  async function refreshOpen(){
-    const r = await api.get('/api/matches?status=OPEN');
-    const rows = r.data || [];
-    setOpenReal(rows.filter(m=>!m.demo));
-    setOpenDemo(rows.filter(m=>m.demo));
+  async function refreshMatches(){
+    const get = (status)=> api.get(`/api/matches?status=${status}`).then(r=>r.data||[]).catch(()=>[]);
+    const [openRows, liveRows] = await Promise.all([get('OPEN'), get('LIVE')]);
+    const merged = [...openRows, ...liveRows].reduce((acc, m)=>{ acc[m.id] = m; return acc; }, {});
+    const all = Object.values(merged);
+    setRealList(all.filter(m=>!m.demo));
+    setDemoList(all.filter(m=>m.demo));
   }
 
   useEffect(()=>{
-    refreshOpen();
-    const t = setInterval(refreshOpen, 7000);
+    refreshMatches();
+    const t = setInterval(refreshMatches, 7000);
     return ()=>clearInterval(t);
   },[]);
 
+  // socket listeners: when room joins, server emits match:state
   useEffect(()=>{
-    if (startedFlag) setStatusMsg('Game started!');
-  }, [startedFlag]);
+    if(!socket) return;
+
+    const onState = (s)=>{
+      setMatch?.(s);
+      setStatusMsg('');
+      setLastJoinedId(s.id);
+      // Go to dedicated match page where the real game UI renders
+      navigate(`/match/${s.id}`);
+    };
+
+    const onPresence = (_)=>{};
+    const onConnectError = (err)=> setStatusMsg('Connection error: '+(err?.message||''));
+
+    socket.on('match:state', onState);
+    socket.on('presence:join', onPresence);
+    socket.on('connect_error', onConnectError);
+
+    return ()=>{
+      socket.off('match:state', onState);
+      socket.off('presence:join', onPresence);
+      socket.off('connect_error', onConnectError);
+    };
+  }, [socket, setMatch, navigate]);
+
+  // auto-join if we were sent here from Create/Join
+  useEffect(()=>{
+    if (focusId && socket){
+      socket.emit('match:joinRoom', { id: focusId });
+      setStatusMsg('Joined match. Loading…');
+      setLastJoinedId(focusId);
+    }
+  }, [focusId, socket]);
 
   function joinRoom(id){
-    socket?.emit('match:joinRoom', { id });
+    if (!socket) return;
+    socket.emit('match:joinRoom', { id });
     setStatusMsg('Joined match. Loading…');
+    setLastJoinedId(id);
   }
   function spectate(id){
-    socket?.emit('match:spectateJoin', { id });
+    if (!socket) return;
+    socket.emit('match:spectateJoin', { id });
     setStatusMsg('Spectating…');
+    setLastJoinedId(id);
   }
-
-  function pause(matchId){
-    socket?.emit('match:pause', { matchId }, (resp)=>{
-      setStatusMsg(resp?.error ? resp.error : 'Paused');
-    });
+  function pause(id){
+    if (!socket) return;
+    socket.emit('match:pause', { matchId:id }, (resp)=> setStatusMsg(resp?.error || 'Paused'));
   }
-  function resume(matchId){
-    socket?.emit('match:resume', { matchId }, (resp)=>{
-      setStatusMsg(resp?.error ? resp.error : 'Resumed');
-    });
+  function resume(id){
+    if (!socket) return;
+    socket.emit('match:resume', { matchId:id }, (resp)=> setStatusMsg(resp?.error || 'Resumed'));
   }
 
   return (
@@ -113,9 +147,9 @@ export default function Arena({ token, socket, match, setMatch, gstate, meIsPlay
         <div className="rounded-2xl bg-gray-900/40 border border-gray-800 p-4">
           <div className="font-semibold mb-2">Quick Tips</div>
           <ul className="list-disc ml-5 text-sm opacity-80 space-y-1">
-            <li>Use the dropdown to preview any game.</li>
-            <li>Open matches are split into Real/Demo below.</li>
-            <li>Spectators can watch and chat; voice is players-only.</li>
+            <li>Open & live matches are combined below.</li>
+            <li>Lists are split by Real vs Demo.</li>
+            <li>Join to start receiving live state.</li>
           </ul>
         </div>
       </div>
@@ -123,14 +157,16 @@ export default function Arena({ token, socket, match, setMatch, gstate, meIsPlay
       <GameDummy game={game} />
 
       <div className="grid md:grid-cols-2 gap-4">
+        {/* REAL (OPEN + LIVE) */}
         <div className="rounded-2xl bg-gray-900/40 border border-gray-800 p-4 shadow-lg">
-          <h3 className="font-semibold mb-3">Open Matches — Real</h3>
+          <h3 className="font-semibold mb-3">Real (Open & Live)</h3>
           <div className="space-y-2 max-h-[24rem] overflow-auto">
-            {openReal.map(m=>(
+            {realList.map(m=>(
               <div key={m.id} className="p-3 rounded-xl bg-gray-800/60 flex items-center justify-between">
                 <div className="text-sm">
-                  <div className="font-semibold">{m.game}</div>
+                  <div className="font-semibold capitalize">{m.game}</div>
                   <div className="opacity-80">Stake ₦{m.stake} • {m.status}</div>
+                  <div className="opacity-70 text-xs break-all">ID: {m.id}</div>
                 </div>
                 <div className="flex gap-2">
                   <button onClick={()=>joinRoom(m.id)} className="px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700">Join</button>
@@ -138,18 +174,20 @@ export default function Arena({ token, socket, match, setMatch, gstate, meIsPlay
                 </div>
               </div>
             ))}
-            {!openReal.length && <div className="text-sm opacity-70">No open real matches.</div>}
+            {!realList.length && <div className="text-sm opacity-70">No real matches yet.</div>}
           </div>
         </div>
 
+        {/* DEMO (OPEN + LIVE) */}
         <div className="rounded-2xl bg-gray-900/40 border border-gray-800 p-4 shadow-lg">
-          <h3 className="font-semibold mb-3">Open Matches — Demo</h3>
+          <h3 className="font-semibold mb-3">Demo (Open & Live)</h3>
           <div className="space-y-2 max-h-[24rem] overflow-auto">
-            {openDemo.map(m=>(
+            {demoList.map(m=>(
               <div key={m.id} className="p-3 rounded-xl bg-gray-800/60 flex items-center justify-between">
                 <div className="text-sm">
-                  <div className="font-semibold">{m.game}</div>
+                  <div className="font-semibold capitalize">{m.game}</div>
                   <div className="opacity-80">Stake ₦{m.stake} • {m.status}</div>
+                  <div className="opacity-70 text-xs break-all">ID: {m.id}</div>
                 </div>
                 <div className="flex gap-2">
                   <button onClick={()=>joinRoom(m.id)} className="px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700">Join</button>
@@ -157,20 +195,17 @@ export default function Arena({ token, socket, match, setMatch, gstate, meIsPlay
                 </div>
               </div>
             ))}
-            {!openDemo.length && <div className="text-sm opacity-70">No open demo matches.</div>}
+            {!demoList.length && <div className="text-sm opacity-70">No demo matches yet.</div>}
           </div>
         </div>
       </div>
 
-      {match && (
-        <div className="grid md:grid-cols-3 gap-4">
-          <div className="md:col-span-2 rounded-2xl bg-gray-900/40 border border-gray-800 p-4">
-            <div className="text-sm opacity-80">Your game UI renders on the Match page; keep this Arena for discovery and controls.</div>
+      {lastJoinedId && (
+        <div className="rounded-2xl bg-gray-900/40 border border-gray-800 p-4">
+          <div className="text-sm">
+            Connected to match: <span className="font-semibold break-all">{lastJoinedId}</span>
           </div>
-          <div className="space-y-3">
-            <ChatPanel socket={socket} match={match} />
-            <VoicePanel socket={socket} match={match} meIsPlayer={meIsPlayer} />
-          </div>
+          {!match && <div className="text-xs opacity-70 mt-1">Waiting for match state…</div>}
         </div>
       )}
     </div>
