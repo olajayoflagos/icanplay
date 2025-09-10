@@ -390,4 +390,4 @@ setInterval(cancelStaleOpenMatches, 60 * 60 * 1000);
 setInterval(runSettlements, 5 * 60 * 1000);
 
 // ---------- start ----------
-server.listen(PORT, () => log.info({ msg: 'I Can Play server listening', PORT }));',
+server.listen(PORT, () => log.info({ msg: 'I Can Play server listening', PORT }));
