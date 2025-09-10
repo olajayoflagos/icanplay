@@ -9,7 +9,7 @@ import pino from 'pino';
 import { Server } from 'socket.io';
 import { v4 as uuid } from 'uuid';
 import { q, withTx, postTx, getBalanceCents } from './db.js';
-import { runSettlements } from './settlement.js';
+import { settleMatch, autoSettleIfOverdue } from './settlement.js';';
 
 const log = pino({ level: process.env.NODE_ENV === 'production' ? 'info' : 'debug' });
 
